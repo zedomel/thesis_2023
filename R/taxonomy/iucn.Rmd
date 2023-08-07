@@ -1,0 +1,357 @@
+---
+title: "Thretened Interactions from IUCN Red List"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading packages
+
+```{r}
+library(tidyverse)
+#library(rredlist) # Needs a IUCN API Token to work
+library(dplyr)
+library(CoordinateCleaner)
+library(sf)
+```
+
+## Preparing Data
+
+Read interaction records with full taxonomic data
+```{r}
+interactions.data <- read.csv("data/interactions-taxon-latlon-time.tsv.gz", header=T, sep = '\t', quote = "") %>%
+  as_tibble()
+head(interactions.data)
+dim(interactions.data)
+```
+
+Clean data: remove records with empty source AND taxon species name OR names not matched by any Taxonomy Catalogue
+```{r}
+interactions.data <- interactions.data %>%
+  filter(sourceTaxonId != 'no:match' & targetTaxonId != 'no:match') %>%
+  filter(sourceTaxonSpeciesName != "" & targetTaxonSpeciesName != '')
+dim(interactions.data)
+```
+
+Create a scientific_name column by merging species and subspecies/variety
+```{r}
+interactions.data <- interactions.data %>% mutate(sourceTaxonName=case_when(
+  sourceTaxonSubspeciesName != '' ~ sourceTaxonSubspeciesName,
+  sourceTaxonVarietyName != '' ~ sourceTaxonVarietyName,
+  .default = sourceTaxonSpeciesName
+  )) %>%
+  mutate(targetTaxonName=case_when(
+    targetTaxonSubspeciesName != '' ~ targetTaxonSubspeciesName,
+    targetTaxonVarietyName != '' ~ targetTaxonVarietyName,
+    .default = targetTaxonSpeciesName
+  )) %>%
+  mutate(sourceTaxonName=stringr::str_replace_all(sourceTaxonName,"'",""), targetTaxonName=stringr::str_replace_all(targetTaxonName,"'","")) %>%
+  mutate(sourceTaxonName=stringr::str_replace_all(sourceTaxonName,"[\\[\\]]",""), targetTaxonName=stringr::str_replace_all(targetTaxonName,"'",""))
+```
+
+Get IUCN Red List From API (needs a API Token)
+```{r}
+#iucn.rl <- rl_sp(all=TRUE)
+#vapply(out, "[[", 1, "count")
+#icun.rl <- do.call(rbind, lapply(out, "[[", "result"))
+#head(icun.rl)
+```
+
+ Read IUCN Red List taxon from file
+```{r}
+iucn.taxon <- read.csv('data/iucn-taxon.tsv', header = F, sep = '\t', stringsAsFactors = F)
+names(iucn.taxon) <- c('id',"scientificName", 'kingdom','phylum', 'class', 'order', 'family', 'genus', 'epithet','authorship', 'rank', 'infraspecificEpithet')
+head(iucn.taxon)
+dim(iucn.taxon)
+```
+
+Clean IUCB data:
+- Remove additional content in ranks (e.g. plantae)
+- If record has infraspecific epithet (subspecies or variety) creates a scientific name including infraspecific epithet (subsp. or var.)
+- Remove authorship from taxon names
+- Join genus and epithet to create a full scientific name
+- Remove records with empty taxon names
+```{r}
+iucn.taxon <- iucn.taxon %>%
+  mutate(rank=stringr::str_split_i(rank,"\\s+", 1)) %>% 
+  mutate(scientific_name=case_when(
+    rank == 'subspecies' ~ sprintf("%s %s subsp. %s", genus, epithet, infraspecificEpithet),
+    rank == 'variety'~ sprintf("%s %s var. %s", genus, epithet, infraspecificEpithet), 
+    .default = paste(genus,epithet))) %>% # genus + epithet
+    mutate(scientific_name=case_when(
+    scientific_name != '' & stringr::str_trim(authorship) != "" ~ stringr::str_trim(stringr::str_replace_all(scientificName,stringr::fixed(authorship),"")), # remove authorship from taxon names
+    .default = scientific_name
+    )) %>%
+  filter(stringr::str_trim(scientific_name) != "") %>%
+  as_tibble()
+iucn.taxon
+```
+
+Read IUCN Red List with threat categories. Column `id` is the id of the species in IUCN taxon list (`iucn.taxon`)
+```{r}
+iucn.threat <- read.csv('data/iucn-threat.tsv', header = F, sep = '\t', stringsAsFactors = F)
+names(iucn.threat) <- c('id', 'threat')
+iucn.threat$id <- as.character(iucn.threat$id)
+head(iucn.threat)
+```
+
+Join IUCN Red List taxon with threat categories by taxon id
+```{r}
+iucn.all <- iucn.taxon %>%
+  inner_join(iucn.threat, by = join_by(id)) %>%
+  select(scientific_name,threat)
+head(iucn.all)
+```
+
+Finally, join interaction records with IUCN Red List
+```{r}
+int.threat <- interactions.data %>%
+  left_join(iucn.all, by = join_by(sourceTaxonName==scientific_name)) %>% #sourceTaxon
+  dplyr::rename(sourceThreat=threat) %>%
+  left_join(iucn.all, by = join_by(targetTaxonName==scientific_name)) %>% #targetTaxon
+  dplyr::rename(targetThreat=threat) %>%
+  filter(!is.na(sourceThreat) | !is.na(targetThreat)) # remove records with empty IUCN categories
+head(int.threat)
+dim(int.threat)
+```
+
+
+Define IUCN categories as ordered factors
+```{r}
+iucn.labels <- c('NE', 'LC', 'NT', 'DD', 'VU', 'EN', 'CR', 'EW', 'EX')
+iucn.categories <- c('Not Evaluated', 'Least Concern', 'Near Threatened','Data Deficient', 'Vulnerable','Endangered', 'Critically Endangered', 'Extinct in the Wild', 'Extinct')
+```
+
+Replace old IUCN categories by the current categories
+```{r}
+int.threat[!is.na(int.threat$sourceThreat) & int.threat$sourceThreat == 'least concern',]$sourceThreat <- 'Least Concern'
+int.threat[!is.na(int.threat$sourceThreat) & int.threat$sourceThreat == 'conservation dependent',]$sourceThreat <- 'Near Threatened'
+int.threat[!is.na(int.threat$sourceThreat) & int.threat$sourceThreat == 'near threatened',]$sourceThreat <- 'Near Threatened'
+int.threat[!is.na(int.threat$targetThreat) & int.threat$targetThreat == 'least concern',]$targetThreat <- 'Least Concern'
+int.threat[!is.na(int.threat$targetThreat) & int.threat$targetThreat == 'conservation dependent',]$targetThreat <- 'Near Threatened'
+int.threat[!is.na(int.threat$targetThreat) & int.threat$targetThreat == 'near threatened',]$targetThreat <- 'Near Threatened'
+```
+
+Apply factors and get max. threat for species and interactions
+```{r}
+int.threatened <- int.threat %>%
+  dplyr::mutate(
+    sourceThreat=factor(sourceThreat, levels=iucn.categories, labels=iucn.labels, ordered=T), 
+    targetThreat=factor(targetThreat, levels=iucn.categories, labels=iucn.labels, ordered=T)) %>%
+  dplyr::group_by(sourceTaxonName) %>%
+  dplyr::mutate(sourceThreat=ifelse(all(is.na(max(sourceThreat))), NA, max(sourceThreat, na.rm = T))) %>%
+  ungroup() %>%
+  dplyr::group_by(targetTaxonName) %>%
+  dplyr::mutate(targetThreat2=ifelse(all(is.na(max(targetThreat))), NA, max(targetThreat, na.rm = T))) %>%
+  ungroup() %>%
+  dplyr::mutate(
+    sourceThreat=factor(sourceThreat, levels=seq(1,length(iucn.categories), 1), labels=iucn.labels, ordered=T), 
+    targetThreat=factor(targetThreat, levels=seq(1,length(iucn.categories), 1), labels=iucn.labels, ordered=T)) %>%
+  mutate(interactionThreat=pmax(sourceThreat, targetThreat, na.rm=T)) %>% # interaction category 
+  filter(!is.na(interactionThreat)) %>%
+  as_tibble()
+int.threatened  
+dim(int.threatened)
+```
+
+## Analysis
+
+Create a data.frame with interaction threats grouped by taxon
+```{r}
+int.by.taxon <- int.threatened %>%
+  filter(!is.na(sourceThreat)) %>%
+  select(sourceTaxonSpeciesName, sourceTaxonOrderName, sourceTaxonFamilyName, sourceTaxonClassName, sourceTaxonKingdomName, sourceThreat) %>%
+  dplyr::rename(speciesName=sourceTaxonSpeciesName, orderName=sourceTaxonOrderName, familyName=sourceTaxonFamilyName, className=sourceTaxonClassName, kingdomName=sourceTaxonKingdomName, threat=sourceThreat) %>%
+  bind_rows(
+    int.threatened %>% 
+      filter(!is.na(targetThreat)) %>% 
+      select(targetTaxonSpeciesName, targetTaxonOrderName, targetTaxonFamilyName, targetTaxonClassName, targetTaxonKingdomName, targetThreat) %>% 
+      dplyr::rename(speciesName=targetTaxonSpeciesName,orderName=targetTaxonOrderName, familyName=targetTaxonFamilyName, className=targetTaxonClassName, kingdomName=targetTaxonKingdomName, threat=targetThreat)) %>%
+  distinct(speciesName, .keep_all = T) %>%  
+  mutate(kingdomName=case_when(
+    kingdomName == 'Metazoa' ~ 'Animalia',
+    kingdomName == 'Chloroplastida' | kingdomName == 'Viridiplantae' ~ 'Plantae',
+    .default = kingdomName
+  ))
+```
+
+IUCN categories by kingdom
+```{r}
+kingdom.threat <- int.by.taxon %>%
+  group_by(kingdomName,threat) %>%
+  filter(kingdomName!='' & threat >= 'VU') %>%
+  dplyr::summarise(count=n()) %>%
+  arrange(kingdomName, desc(threat), count)
+kingdom.threat
+```
+
+
+ Counting Interactions threats
+```{r}
+int.threatened %>%
+  distinct(sourceTaxonSpeciesName, targetTaxonSpeciesName, interactionThreat, .keep_all = T) %>%
+  dplyr::count(interactionThreat) %>%
+  arrange(desc(interactionThreat))
+```
+
+Sum categories above VU
+```{r}
+int.threatened %>%
+  distinct(sourceTaxonSpeciesName, targetTaxonSpeciesName, interactionThreat, .keep_all = T) %>%
+  dplyr::count(interactionThreat) %>%
+  filter(interactionThreat >= "VU") %>%
+  summarise(n=sum(n))
+```  
+
+Counting Interaction threat in the Animalia kingdom
+```{r}
+int.by.taxon %>%
+  filter(kingdomName == 'Animalia' & threat >= 'VU') %>%
+  distinct(speciesName, threat, .keep_all = T) %>%
+  dplyr::count(className) %>%
+    ungroup() %>%
+  dplyr::add_count(wt=n, name='total') %>%
+  mutate(perc=round(n/total*100,1)) %>%
+  arrange(desc(n))
+```
+
+Counting Interaction threat in the Plantae kingdom
+```{r}
+int.by.taxon %>%
+  filter(kingdomName == 'Plantae' & threat >= 'VU') %>%
+  distinct(speciesName, threat, .keep_all = T) %>%
+  filter(className=="Magnoliopsida") %>%
+  dplyr::count(orderName) %>%
+  ungroup() %>%
+  dplyr::add_count(wt=n, name='total') %>%
+  mutate(perc=round(n/total*100,2)) %>%
+  arrange(desc(n))
+```
+
+```{r}
+int.by.taxon %>%
+  filter(kingdomName == 'Plantae' & threat >= 'VU') %>%
+  distinct(speciesName, threat, .keep_all = T) %>%
+  dplyr::count(familyName, threat) %>%
+  arrange(desc(n)) %>%
+  dplyr::count()
+```
+
+## Geographical analysis of threated interactions
+
+Calculate % of threatened interaction in/out of Protected Areas.
+
+Read World Database of Protected Area polygon previously prepared in (Geographical Analysis)[http://].
+```{r}
+wdpa <- readRDS('data/wdpa-poly-cleaned.rds')
+```
+
+DEBUG
+```{r}
+wdpa <- wdpa %>% sample_n(1000)
+wdpa <- wdpa %>% 
+  filter(GEOMETRY_TYPE=="POLYGON")
+```
+
+Clean interaction records coordinates
+```{r}
+int.threat.latlon <- int.threatened %>%
+  #filter(!is.na(decimalLatitude) & !is.na(decimalLongitude)) %>%
+  CoordinateCleaner::cc_val(lat="decimalLatitude", lon="decimalLongitude", verbose = F) %>%
+  CoordinateCleaner::cc_zero(lat="decimalLatitude", lon="decimalLongitude", verbose=F)
+  #CoordinateCleaner::cc_sea(lat="decimalLatitude", lon="decimalLongitude", verbose = F, speedup = T,ref = sf::as_Spatial(countries)) 
+```
+
+Create spatial points for threatened interaction records (>= VU)
+```{r}
+int.threat.points <- int.threat.latlon %>% 
+  filter(interactionThreat >= 'VU') %>%
+  st_as_sf(coords = c('decimalLongitude','decimalLatitude'), crs = 4326)
+```
+
+Re-project to WGS84
+```{r}
+wdpa <- st_transform(wdpa, 4326)
+```
+
+Find intersection between WDPA polygons and interaction points
+```{r}
+int.wdpa <- st_intersects(int.threat.points, wdpa)
+```
+
+Get intersected points
+```{r}
+int.points.intersect <- lengths(int.wdpa) > 0
+wdpa.intersect <- lengths(t(int.wdpa)) > 0
+```
+
+Count number of interaction records within PAs
+```{r}
+count.int.threatened <- int.threat.points[int.points.intersect,] %>%
+  filter(interactionThreat >= 'VU') %>%
+  dplyr::count()
+count.int.threatened
+```
+
+Display results
+```{r}
+print(paste0("% of threated interactions inside protected areas: ", round(nrow(int.threat.points[int.points.intersect,])/nrow(int.threat.points)*100,2), '%'))
+print(paste0("% of threated interactions (>=VU) inside protected areas: ", round(nrow(count.int.threatened)/nrow(int.threat.points)*100,2), '%'))
+wdpa.total_area <- sum(wdpa$REP_ARE)
+int.total_area <- sum(wdpa[wdpa.intersect,]$REP_ARE)
+print(paste("% Total area of protected areas with threatened interaction records:", int.total_area/wdpa.total_area*100))
+print(paste("Total area (milions of km2) of protected areas with interaction records:", int.total_area))
+```
+
+
+Plot
+```{r}
+threats.by.class <- int.by.taxon %>%
+  filter(className!="") %>%
+  distinct(speciesName, threat, .keep_all = T) %>%
+  filter(threat < 'EX') %>%
+  dplyr::count(className,threat) %>%
+  group_by(className) %>%
+  dplyr::add_count(wt=n, name='total') %>%
+  mutate(group_percent=n/total*100,2) %>%
+  filter(total>=100) %>%
+  arrange(desc(n))
+threats.by.class
+```
+
+```{r}
+
+library(hrbrthemes)
+plt <- threats.by.class %>%
+  ggplot(aes(y = className, x = group_percent, fill = threat)) +
+  geom_bar(position = "fill", stat="identity", width=0.5) +
+  scale_fill_manual(values = rev(c("black", "red", "#ff7f0e", "yellow", "grey", "lightgreen", "green"))) +
+  theme_ipsum(base_family = 'Arial') +
+  scale_x_continuous('Percent', labels = scales::percent, expand = c(0, 0)) +
+  guides(fill = guide_legend(nrow = 1)) +
+  geom_text(aes(label=total), 
+            x = 1.01, 
+                hjust = 0,
+                size = 4,
+            font='Arial',
+            color="grey60") +
+  coord_cartesian(xlim = c(0, 1), # This focuses the x-axis on the range of interest
+                      clip = 'off') +   # This keeps the labels from disappearing
+  #coord_fixed(0.1) +
+  theme(legend.position = "top", plot.margin = unit(c(1,3,1,1), "lines"))
+plt
+```
+
+```{r}
+ggsave('images/iucn-threats.png', plt, dpi = 300)
+```
+
+
+Savve threatened list
+```{r}
+int.threatened %>%
+  distinct(sourceTaxonSpeciesName, targetTaxonSpeciesName, interactionThreat, .keep_all = T) %>%
+  select(sourceTaxonSpeciesName, sourceTaxonKingdomName, sourceta interactionThreat, )
+```

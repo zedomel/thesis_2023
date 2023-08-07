@@ -1,0 +1,673 @@
+---
+title: "GBIF Biotic Interactions Data - Taxonomic Analysis"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages
+
+```{r library}
+library(dplyr)
+library(viridis)
+library(scales)
+library(hrbrthemes)
+```
+
+## Load and prepare Data
+
+Load all interaction records
+```{r interaction-data}
+interactions.all <- read.csv('data/interactions-taxon-loc-time.tsv.gz', sep = '\t', quote="")
+head(interactions.all)
+dim(interactions.all)
+```
+
+Replace kingdom with superkingdom where kingdom is empty
+```{r}
+interactions <- interactions.all %>%
+  mutate(
+    sourceTaxonKingdomName=ifelse(sourceTaxonKingdomName == "" & sourceTaxonSuperkingdomName!="", sourceTaxonSuperkingdomName, sourceTaxonKingdomName),
+    targetTaxonKingdomName=ifelse(targetTaxonKingdomName == "" & targetTaxonSuperkingdomName!="", targetTaxonSuperkingdomName, targetTaxonKingdomName)
+    )
+```
+
+Remove interactions without taxonomic identification
+```{r}
+interactions.excluded <- interactions %>%
+  filter(sourceTaxonId == 'no:match' | targetTaxonId == 'no:match') %>%
+  filter(sourceTaxonKingdomName=="" | targetTaxonKingdomName=="")
+
+interactions <- interactions %>%
+  filter(sourceTaxonId != 'no:match' & targetTaxonId != 'no:match') %>%
+  filter(sourceTaxonKingdomName!="" & targetTaxonKingdomName!="")
+dim(interactions)
+```
+
+Examples of names excluded
+```{r}
+interactions.excluded %>%
+  filter(sourceTaxonKingdomName=="") %>%
+  select(sourceTaxonKingdomName, sourceTaxonName) %>%
+  dplyr::rename(kingdomName=sourceTaxonKingdomName, taxonName=sourceTaxonName) %>%
+  bind_rows(
+    interactions.excluded %>%
+      filter(targetTaxonKingdomName=="") %>%
+      select(targetTaxonKingdomName, targetTaxonName) %>%
+      dplyr::rename(kingdomName=targetTaxonKingdomName, taxonName=targetTaxonName) 
+  ) %>%
+  pivot_longer(cols=c(taxonName)) %>%
+  group_by(value) %>%
+  dplyr::summarize(n=n()) %>%
+  ungroup() %>%
+  mutate(total=sum(n), perc=round(n/total*100,2)) %>%
+  arrange(desc(n))
+```
+
+Counting interactions by type
+```{r}
+interactions.all %>%
+  group_by(interactionTypeName) %>%
+  dplyr::summarise(n=n(),perc=round(n/nrow(.)*100,2)) %>%
+  arrange(desc(n))
+```
+Create a list of taxon names from interaction records:
+
+```{r}
+my.species <- interactions %>%
+  dplyr::rename(id=sourceTaxonId,speciesName=sourceTaxonSpeciesName,kingdomId=sourceTaxonKingdomId,kingdomName=sourceTaxonKingdomName) %>%
+  select(id,speciesName,kingdomId,kingdomName) %>%
+  bind_rows(
+    interactions %>%
+      dplyr::rename(id=targetTaxonId, speciesName=targetTaxonSpeciesName, kingdomId=targetTaxonKingdomId, kingdomName=targetTaxonKingdomName) %>%
+      select(id,speciesName,kingdomId,kingdomName)
+  ) %>%
+  dplyr::distinct(id,speciesName,kingdomId,kingdomName) 
+head(my.species)
+dim(my.species)
+```
+
+NCBI uses IPTV for virus names but here we grouped all names into the same kingdom: Viruses. Define a list of virus names:
+
+```{r viruses}
+viruses <- c('Riboviria', 'Monodnaviria', 'Naldaviricetes', 'Duplodnaviria', 'Pospiviroidae',
+             'Varidnaviria', 'Adnaviria', 'Polydnaviridae', 'Alphasatellitidae',
+             'Tolecusatellitidae', 'Dinodnavirus', 'Thaspiviridae', 'Rhizidiovirus',
+             "Portogloboviridae","Ovaliviridae", "Guttaviridae", "Fuselloviridae",    
+             "Anelloviridae", "Avsunviroidae", "Bicaudaviridae", "Spiraviridae",
+             "Clavaviridae", "Finnlakeviridae", "Halspiviridae", "Globuloviridae",
+             "Ampullaviridae", "Ribozyviria", "Plasmaviridae", 'Orthornavirae',
+             'Shotokuvirae', 'Heunggongvirae', 'Pararnavirae', 'Bamfordvirae',
+             'Helvetiavirae', 'Sangervirae', 'Loebvirae', 'Zilligvirae', 'Trapavirae')
+```
+
+Counting interactions by kingdom
+```{r}
+interactions %>%
+  dplyr::rename(id=sourceTaxonId,speciesName=sourceTaxonSpeciesName,kingdomId=sourceTaxonKingdomId,kingdomName=sourceTaxonKingdomName) %>%
+  select(id,speciesName,kingdomId,kingdomName) %>%
+  bind_rows(
+    interactions %>%
+      dplyr::rename(id=targetTaxonId, speciesName=targetTaxonSpeciesName, kingdomId=targetTaxonKingdomId, kingdomName=targetTaxonKingdomName) %>%
+      select(id,speciesName,kingdomId,kingdomName)
+  ) %>%
+  mutate(kingdomName=ifelse(kingdomName %in% viruses, "Viruses", kingdomName)) %>%
+  mutate(kingdomName=ifelse(kingdomName %in% c('Plantae','Viridiplantae','Chloroplastida','Archaeplastida'), 'Plant/Viridiplantae/Chloroplastida/Archaeplastida', kingdomName)) %>%
+  mutate(kingdomName=ifelse(kingdomName %in% c('Animalia', 'Metazoa', 'Protozoa'), 'Animalia/Metazoa/Protozoa', kingdomName)) %>%
+  mutate(kingdomName=ifelse(kingdomName %in% c('Fungi', 'Chromista'), 'Fungi/Chromista', kingdomName)) %>%
+  mutate(kingdomName=ifelse(kingdomName == 'Eukaryota', 'incertae sedis', kingdomName)) %>%
+  group_by(kingdomName) %>%
+  dplyr::summarise(n=n(), perc=round(n/(nrow(interactions)*2)*100,1)) %>%
+  arrange(desc(n))
+ 
+```
+
+Loading GBIF Backbone Taxonomy
+
+```{r gbif-data}
+gbif.species <- read.csv('data/gbif-species-list.tsv', header = F, sep='\t')
+names(gbif.species) <- c('id', 'rank', 'kingdomId', 'scientificName', 'speciesName')
+head(gbif.species)
+dim(gbif.species)
+```
+
+Loading GBIF Kingdom IDs
+
+```{r}
+kingdoms <-read.csv('data/gbif-kingdom.tsv', header = F, sep = '\t', col.names=c('kingdomId','kingdomName'))
+kingdoms
+```
+
+Select only GBIF taxon names and remove the `GBIF:` prefix from taxon Id's
+
+```{r}
+my.gbif.species <- my.species %>%
+  filter(stringr::str_detect(id,"GBIF:")) %>%
+  mutate(id = stringr::str_replace_all(id,'GBIF:', ''), kingdomId = stringr::str_replace(kingdomId, 'GBIF:', ''))
+head(my.gbif.species)
+```
+
+Join data.frames into one and count number of species names by kingdom
+
+```{r}
+species.by.kingdom <- gbif.species %>%
+  dplyr::count(kingdomId, name='gbif') %>%
+  left_join(kingdoms, by = join_by(kingdomId)) %>%
+  select(kingdomName,gbif) %>%
+  dplyr::left_join(my.gbif.species %>% dplyr::count(kingdomName, name='my'), by = join_by(kingdomName)) %>%
+  filter(kingdomName != 'Viruses' & kingdomName != 'incertae sedis')
+species.by.kingdom$my[is.na(species.by.kingdom$my)] <- 0
+species.by.kingdom
+```
+
+Reorganize data.frame to have counts by source (GBIF, my)
+
+```{r}
+data.gbif <- species.by.kingdom %>% gather(key = "source", value="value", -c(1)) %>%
+  bind_rows(group_by(., source) %>% dplyr::summarise(value=sum(value)) %>% mutate(kingdomName='All Kingdoms'))
+head(data.gbif)
+```
+
+Loading NCBI Taxonomy
+
+```{r ncbi}
+ncbi.taxonomy <- read.csv('data/ncbi-taxonomy-reformatted.tsv', header = F, sep='\t', quote = "")
+names(ncbi.taxonomy) <- c('id','v2','superKingdom', 'kingdom', 'phylum', 'class', 'order', 'family', 'genus', 'species')
+head(ncbi.taxonomy)
+```
+
+Clean data: remove double quotes in names, set super kingdom as kingdom where kingdom is missing (`NA` or `""`) and change kingdom to Viruses if taxon name is in `viruses` list
+
+```{r}
+ncbi.taxonomy <- ncbi.taxonomy %>%
+  select(-v2) %>%
+  mutate(kingdom=stringr::str_trim(kingdom), superKingdom=stringr::str_trim(superKingdom)) %>%
+  mutate(kingdomNorm=ifelse(kingdom == "" & superKingdom != '', superKingdom, kingdom)) %>%
+  mutate(kingdomNorm=ifelse(kingdom %in% viruses, "Viruses", kingdomNorm)) %>%
+  mutate(kingdomNorm = stringr::str_remove_all(kingdomNorm, '"'))
+head(ncbi.taxonomy)
+```
+
+Loading DwC-A list of taxon names
+
+```{r}
+my.ncbi.species <- my.species %>%
+  filter(stringr::str_detect(id,"NCBI:")) %>%
+  mutate(kingdomName=ifelse(kingdomName %in% viruses, "Viruses", kingdomName)) %>%
+  mutate(
+    id = stringr::str_replace_all(id,'NCBI:', ''),
+    kingdomId = stringr::str_replace_all(kingdomId, 'NCBI:', '')
+  )
+head(my.ncbi.species)
+dim(my.ncbi.species)
+```
+
+Clean data: remove double quotes in names and set super kingdom as kingdom where kingdom is missing (`NA` or `""`)
+
+```{r}
+my.ncbi.species <- my.ncbi.species %>%
+  mutate(across(is.character, ~ stringr::str_remove_all('"')))
+head(my.ncbi.species)
+```
+
+Join data.frames
+
+```{r}
+species.ncbi.by.kingdom <- ncbi.taxonomy %>%
+  dplyr::count(kingdomNorm, name='ncbi') %>%
+  select(kingdomNorm,ncbi) %>%
+  mutate(kingdomNorm=stringr::str_trim(kingdomNorm)) %>%
+  left_join(my.ncbi.species %>% dplyr::count(kingdomName, name='my') %>% mutate(kingdomName = stringr::str_trim(kingdomName)), by = join_by(kingdomNorm==kingdomName))
+```
+
+Set count to `0` if it is `NA`
+
+```{r}
+species.ncbi.by.kingdom$my[is.na(species.ncbi.by.kingdom$my)] <- 0
+species.ncbi.by.kingdom
+```
+
+Reorganize data
+
+```{r}
+data.ncbi <- species.ncbi.by.kingdom %>% gather(key = "source", value="value", -c(1)) %>%
+  bind_rows(group_by(., source) %>% dplyr::summarise(value=sum(value)) %>% mutate(kingdomNorm='All Kingdoms'))
+```
+
+Reorder factors:
+
+```{r}
+data.ncbi <- data.ncbi %>%
+  filter(kingdomNorm!='') |>
+  group_by(kingdomNorm, source) |> 
+  mutate(source=as.factor(source))
+```
+
+## Taxonomic Coverage
+
+### Plot Taxonomic coverage by kingdom
+
+GBIF
+
+```{r plot}
+plt <- data.gbif |> 
+  group_by(kingdomName, source) |> 
+  ggplot(aes(x = source, y = value, fill=kingdomName)) +
+  geom_col() +
+  scale_fill_viridis(
+    discrete = T,
+    option='A',
+    guide='none'
+  ) +
+  scale_y_continuous(labels = label_number(suffix = " M", scale = 1e-6), n.breaks = 4) + # millions
+  scale_x_discrete(labels=c('GBIF', 'Local')) + 
+  facet_wrap(~ kingdomName, scales = 'free') + 
+  coord_flip() + 
+  labs(fill='Kingdom', title = "Taxonomic coverage by kingdom", subtitle =expression("Comparison of the number of species names found in \n analyzed data (local) and in GBIF Backbone Taxonomy")) +
+  theme_ipsum(
+    base_family = 'Arial',
+  ) +
+  theme(
+    panel.spacing = unit(0,'lines'),
+    plot.subtitle = element_text(margin = margin(2,0,0,0, "mm")),
+    axis.title = element_blank(),
+    strip.text = element_text(size=10),
+    axis.text.x = element_text(size=6),
+    axis.text.y = element_text(size=8),
+  ) 
+plt
+```
+
+Save plot:
+
+```{r saveplot}
+ggsave('images/taxon-cov-by-kingdom-gbif.png', plt, dpi = 300)
+```
+
+NCBI
+
+```{r}
+plt <- data.ncbi %>%
+  filter(kingdomNorm!='') |>
+  group_by(kingdomNorm, source) |> 
+  mutate(source=as.factor(source)) %>%
+  ggplot(aes(x = source, y = value, fill=kingdomNorm)) +
+  geom_col() +
+  scale_fill_viridis(
+    discrete = T,
+    option='A',
+    guide='none'
+  ) +
+  scale_y_continuous(labels = label_number(suffix = " M", scale = 1e-6), n.breaks = 4) + # millions
+  scale_x_discrete(labels=c('NCBI', 'Local'), limits=rev(levels(data.ncbi$source))) + 
+  facet_wrap(~ kingdomNorm, scales = 'free') + 
+  coord_flip() + 
+  labs(fill='Kingdom', title = "Taxonomic coverage by kingdom", subtitle =expression("Comparison of the number of species names found in \n analyzed data (local) and in NCBI Taxonomy")) +
+  theme_ipsum(
+    base_family = 'Arial'
+  ) +
+  theme(
+    panel.spacing = unit(0,'lines'),
+    plot.subtitle = element_text(margin = margin(2,0,0,0, "mm")),
+    axis.title = element_blank(),
+    strip.text = element_text(size=10),
+    axis.text.x = element_text(size=6),
+    axis.text.y = element_text(size=8),
+  )
+plt
+```
+
+Save plot
+
+```{r}
+ggsave('images/taxon-cov-by-kingdom-ncbi.png', plt, dpi = 300)
+```
+
+### Calcute coverages
+
+GBIF: by kingdom and overall coverage
+
+```{r}
+species.by.kingdom %>%
+  mutate(coverage=round(my/gbif*100,1))
+species.by.kingdom %>%
+  summarise(my=sum(my), gbif=sum(gbif), coverage=round(my/gbif*100,2))
+```
+
+NCBI: by kingdom and overall coverage
+
+```{r}
+species.ncbi.by.kingdom %>%
+  mutate(coverage=round(my/ncbi*100,1))
+species.ncbi.by.kingdom %>%
+  summarise(my=sum(my), ncbi=sum(ncbi), coverage=round(my/ncbi*100,2))
+```
+
+## Completeness Interaction records
+
+Replace empty coordinates and date for `NA`
+```{r}
+interactions <- interactions %>%
+  dplyr::mutate(
+    decimalLatitude=replace(decimalLatitude, decimalLatitude=="", NA), 
+    decimalLongitude=replace(decimalLongitude, decimalLongitude=="", NA),
+    eventDate=replace(eventDate, eventDate=="", NA)
+    )
+```
+
+Preparing data for counting interactions by taxon rank. First remove interaction without GBIF taxon IDs, then, create flag for records with/without geographic coordinates (`hasloc`) and temporal data (`hasdate`) and both (`haslocdata`).
+```{r}
+counts.by.rank <- interactions %>%
+  filter(stringr::str_starts(sourceTaxonId, "GBIF:") & stringr::str_starts(targetTaxonId, "GBIF:")) %>%
+  dplyr::mutate(hasloc=!is.na(decimalLatitude) & !is.na(decimalLongitude), hasdate=!is.na(eventDate), haslocdate=!is.na(decimalLatitude) & !is.na(decimalLongitude) & !is.na(eventDate))
+head(counts.by.rank)
+```
+
+Counting number of interaction records at species level by kingdom
+```{r}
+counts.species.rank <- counts.by.rank %>%
+  distinct(sourceTaxonKingdomName, sourceTaxonSpeciesName, .keep_all=T) %>%
+  group_by(sourceTaxonKingdomName) %>%
+  dplyr::summarise(n=n(),nloc=sum(hasloc), ndate=sum(hasdate), nlocdate=sum(haslocdate))
+counts.species.rank
+```
+Counting number of interaction records from higher taxon ranks
+```{r}
+count.up.species.rank <- counts.by.rank %>%
+  distinct(sourceTaxonKingdomName, sourceTaxonPhylumName, sourceTaxonClassName, sourceTaxonOrderName, sourceTaxonFamilyName, sourceTaxonGenusName, .keep_all = T) %>%
+  group_by(sourceTaxonKingdomName) %>%
+  dplyr::summarise(n=n(),nloc=sum(hasloc), ndate=sum(hasdate), nlocdate=sum(haslocdate))
+count.up.species.rank
+```
+
+Combine the both data.frame into one data.frame and set the `group` variable (`species` = species level identification of taxa and `other` = higher rank/unranked)
+
+```{r}
+counts.by.rank <- counts.species.rank %>%
+  mutate(group="species") %>%
+  bind_rows(count.up.species.rank %>% mutate(group="other")) %>%
+  filter(sourceTaxonKingdomName!="incertae sedis" & sourceTaxonKingdomName!="Viruses")  %>%
+  mutate(sourceTaxonKingdomName=as.factor(stringr::str_trim(stringr::str_replace_all(sourceTaxonKingdomName,'"', ""))))
+counts.by.rank %>%
+  arrange(desc(n))
+```
+
+Reorganize data.frame for plot and calculate percentages
+```{r}
+counts.by.rank <- counts.by.rank %>%
+  group_by(sourceTaxonKingdomName) %>%
+  dplyr::mutate(tot=sum(n)) %>%
+  ungroup() %>%
+  dplyr::mutate(np=n/tot*100,nlocp=nloc/tot*100,ndatep=ndate/tot*100, nlocdatep=nlocdate/tot*100) %>%
+  dplyr::select(sourceTaxonKingdomName, group, nlocp,ndatep,nlocdatep) %>% 
+  complete(sourceTaxonKingdomName,group, fill = list(nlocp=0,ndatep=0,nlocdate=0)) %>% 
+  gather(key="measure", value="value", -c(1,2))
+counts.by.rank
+```
+
+Rename measures for plot
+```{r}
+counts.by.rank$measure[counts.by.rank$measure == 'nlocp'] <- 'w/ location'
+counts.by.rank$measure[counts.by.rank$measure == 'ndatep'] <- 'w/ time'
+counts.by.rank$measure[counts.by.rank$measure == 'nlocdatep'] <- 'w/ loc. and time'
+```
+
+### Plot 
+
+Set a number of `empty_bar` to add at the end of each group.
+```{r}
+empty_bar <- 2
+nObsType <- nlevels(as.factor(counts.by.rank$group))
+to_add <- data.frame( matrix(NA, empty_bar*nlevels(counts.by.rank$sourceTaxonKingdomName)*nObsType, ncol(counts.by.rank)) )
+colnames(to_add) <- colnames(counts.by.rank)
+to_add$sourceTaxonKingdomName <- rep(levels(counts.by.rank$sourceTaxonKingdomName), each=empty_bar*nObsType )
+data <- rbind(counts.by.rank, to_add)
+data <- data %>% arrange(sourceTaxonKingdomName, measure)
+data$id <- rep( seq(1, nrow(data)/nObsType) , each=nObsType)
+```
+
+
+Get the name and the y position of each label
+```{r}
+label_data <- data %>% 
+  dplyr::group_by(id, measure) %>% 
+  dplyr::summarize(tot=sum(value)) %>%
+  ungroup()
+number_of_bar <- nrow(label_data)
+angle <- 90 - 360 * (label_data$id-0.5) /number_of_bar     # I substract 0.5 because the letter must have the angle of the center of the bars. Not extreme right(1) or extreme left (0)
+label_data$hjust <- ifelse( angle < -90, 1, 0)
+label_data$angle <- ifelse(angle < -90, angle+180, angle)
+```
+
+Prepare a data frame for base lines
+```{r}
+base_data <- data %>% 
+  group_by(sourceTaxonKingdomName) %>% 
+  dplyr::summarize(start=min(id), end=max(id) - empty_bar) %>% 
+  rowwise() %>% 
+  dplyr::mutate(title=mean(c(start, end)))
+```
+
+Prepare a data frame for grid (scales)
+```{r}
+grid_data <- base_data
+grid_data$end <- grid_data$end[ c( nrow(grid_data), 1:nrow(grid_data)-1)] + 1
+grid_data$start <- grid_data$start - 1
+grid_data <- grid_data[-1,]
+```
+
+Make the plot
+```{r}
+p <- data %>% 
+  ggplot() +      
+  # Add the stacked bar
+  geom_bar(aes(x=as.factor(id), y=value, fill=group), stat="identity", alpha=0.5) +
+  scale_fill_viridis(discrete=TRUE, name="Rank", option = 'D', labels=c("Higher ranks/Unranked", "Species"), alpha = 1) +
+  
+  # Add a val=100/75/50/25 lines. I do it at the beginning to make sur barplots are OVER it.
+  geom_segment(data=grid_data, aes(x = end, y = 0, xend = start, yend = 0), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) +
+  geom_segment(data=grid_data, aes(x = end, y = 20, xend = start, yend = 20), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) +
+  geom_segment(data=grid_data, aes(x = end, y = 40, xend = start, yend = 40), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) +
+  geom_segment(data=grid_data, aes(x = end, y = 60, xend = start, yend = 60), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) +
+  geom_segment(data=grid_data, aes(x = end, y = 80, xend = start, yend = 80), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) +
+  geom_segment(data=grid_data, aes(x = end, y = 100, xend = start, yend = 100), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) +
+  
+  # Add text showing the value of each 100/75/50/25 lines
+  ggplot2::annotate("text", x = rep(max(data$id),6), y = c(0, 20, 40, 60, 80, 100), label = c("0%", "20%", "40%", "60%", "80%", "100%") , color="grey", size=2 , angle=0, fontface="bold", hjust=1) +
+  
+  ylim(-80,max(label_data$tot, na.rm=T)+10) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    panel.grid = element_blank(),
+    plot.margin = unit(rep(0.1,4), "cm"),
+    plot.title = element_text(
+      family = 'Econ Sans Cnd',
+      face = 'bold',
+      size = 12
+    ),
+    plot.subtitle = element_text(
+      family = 'Econ Sans Cnd',
+      size=8
+    )
+  ) +
+  coord_polar() +
+  
+  # Add labels on top of each bar
+  geom_text(data=label_data, aes(x=id, y=tot+10, label=measure, hjust=hjust), color="black", fontface="bold",alpha=0.6, size=1.5, angle= label_data$angle, inherit.aes = FALSE ) +
+  
+  # Add base line information
+  geom_segment(data=base_data, aes(x = start, y = -5, xend = end, yend = -5), colour = "black", alpha=0.8, linewidth=0.6 , inherit.aes = FALSE )  +
+  geom_text(data=base_data, aes(x = title, y = c(-20,-27,-27,-27,-20,-27,-27), label=sourceTaxonKingdomName), hjust=c(0.5,0.5,0.6,0.5,0.5,0.5,0.4), colour = viridis(n=nlevels(base_data$sourceTaxonKingdomName)), alpha=0.8, size=2, fontface="bold", inherit.aes = FALSE) +
+  labs(
+    title="Completeness of biotic interaction records",
+    subtitle = 'Percentage of records with location, time and both location and time data'
+  )
+p
+```
+Save plot
+```{r}
+ggsave(p, file="images/completeness.png", dpi=300, bg="white")
+```
+
+
+
+## Summarizing interactions by kingdom
+
+Normalize kingdom names
+```{r}
+plants <- c('Plantae', 'Viridiplantae', 'Chloroplastida','Archaeplastida')
+animals <- c('Animalia', 'Metazoa', 'Protozoa')
+int.kingdoms <- interactions %>%
+  mutate(sourceTaxonKingdomName=case_when(
+    sourceTaxonKingdomName %in% viruses ~ 'Viruses', 
+    sourceTaxonKingdomName %in% plants ~ 'Plantae',
+    sourceTaxonKingdomName %in% animals ~ 'Animalia',
+    sourceTaxonKingdomName == 'Chromista' ~ 'Fungi',
+    sourceTaxonKingdomName == 'Eukaryota' ~ 'incertae sedis',
+    .default = sourceTaxonKingdomName),
+    targetTaxonKingdomName=case_when(
+      targetTaxonKingdomName %in% viruses ~ 'Viruses', 
+      targetTaxonKingdomName %in% plants ~ 'Plantae',
+      targetTaxonKingdomName %in% animals ~ 'Animalia',
+      targetTaxonKingdomName == 'Chromista' ~ 'Fungi',
+      targetTaxonKingdomName == 'Eukaryota' ~ 'incertae sedis',
+      .default = targetTaxonKingdomName)
+    )
+dim(int.kingdoms)
+```
+
+Count interactions by kingdom
+
+```{r}
+int.kingdoms <- int.kingdoms %>%
+  dplyr::count(sourceTaxonKingdomName, targetTaxonKingdomName) %>%
+  arrange(sourceTaxonKingdomName, targetTaxonKingdomName, n)
+
+int.kingdoms[which(int.kingdoms$sourceTaxonKingdomName > int.kingdoms$targetTaxonKingdomName), c("sourceTaxonKingdomName", "targetTaxonKingdomName")] <-
+  rev(int.kingdoms[which(int.kingdoms$sourceTaxonKingdomName > int.kingdoms$targetTaxonKingdomName), c("sourceTaxonKingdomName","targetTaxonKingdomName")])
+
+int.kingdoms <- int.kingdoms %>%
+  group_by(sourceTaxonKingdomName, targetTaxonKingdomName) %>%
+  dplyr::summarise(n=sum(n))
+
+int.kingdoms %>%
+  group_by(sourceTaxonKingdomName, targetTaxonKingdomName) %>%
+  arrange(desc(n)) %>%
+  mutate(perc=round(n/sum(int.kingdoms$n)*100,1))
+```
+
+## Most common interaction by kingdom
+
+```{r}
+int.kingdoms <- interactions %>%
+  filter(sourceTaxonId != 'no:match' & targetTaxonId != 'no:match') %>%
+  filter(sourceTaxonKingdomName!="" & targetTaxonKingdomName!="") %>%
+  mutate(sourceTaxonKingdomName=case_when(
+    sourceTaxonKingdomName %in% viruses ~ 'Viruses', 
+    sourceTaxonKingdomName %in% plants ~ 'Plantae',
+    sourceTaxonKingdomName %in% animals ~ 'Animalia',
+    sourceTaxonKingdomName == 'Chromista' ~ 'Fungi',
+    .default = sourceTaxonKingdomName),
+    targetTaxonKingdomName=case_when(
+      targetTaxonKingdomName %in% viruses ~ 'Viruses', 
+      targetTaxonKingdomName %in% plants ~ 'Plantae',
+      targetTaxonKingdomName %in% animals ~ 'Animalia',
+      targetTaxonKingdomName == 'Chromista' ~ 'Fungi',
+      .default = targetTaxonKingdomName)
+    ) %>%
+  dplyr::count(sourceTaxonKingdomName, targetTaxonKingdomName, interactionTypeName) %>%
+  arrange(sourceTaxonKingdomName, targetTaxonKingdomName, n)
+
+int.kingdoms[which(int.kingdoms$sourceTaxonKingdomName > int.kingdoms$targetTaxonKingdomName), c("sourceTaxonKingdomName", "targetTaxonKingdomName")] <-
+  rev(int.kingdoms[which(int.kingdoms$sourceTaxonKingdomName > int.kingdoms$targetTaxonKingdomName), c("sourceTaxonKingdomName","targetTaxonKingdomName")])
+
+int.kingdoms <- int.kingdoms %>%
+  group_by(sourceTaxonKingdomName, targetTaxonKingdomName, interactionTypeName) %>%
+  dplyr::summarise(n=sum(n)) %>%
+  arrange(desc(n))
+int.kingdoms
+```
+
+### Plants
+
+## Most common plant families
+```{r}
+interactions %>%
+  filter(sourceTaxonKingdomName %in% plants | targetTaxonKingdomName %in% plants) %>%
+  dplyr::rename(id=sourceTaxonId,speciesName=sourceTaxonSpeciesName,kingdomId=sourceTaxonKingdomId,kingdomName=sourceTaxonKingdomName, family=sourceTaxonFamilyName) %>%
+  select(id,speciesName,kingdomId,kingdomName, family) %>%
+  bind_rows(
+    interactions %>%
+      filter(sourceTaxonKingdomName %in% plants | targetTaxonKingdomName %in% plants) %>%
+      dplyr::rename(id=targetTaxonId, speciesName=targetTaxonSpeciesName, kingdomId=targetTaxonKingdomId, kingdomName=targetTaxonKingdomName,family=targetTaxonFamilyName) %>%
+      select(id,speciesName,kingdomId,kingdomName, family)
+  ) %>%
+  filter(kingdomName %in% plants) %>%
+  group_by(family) %>%
+  dplyr::summarise(n=n(), perc=round(n/(nrow(interactions)*2)*100,1)) %>%
+  arrange(desc(n))
+  
+```
+
+```{r}
+int.kingdoms %>%
+  filter(sourceTaxonKingdomName=='Plantae' | targetTaxonKingdomName=='Plantae') %>%
+  group_by(sourceTaxonKingdomName, targetTaxonKingdomName, interactionTypeName) %>%
+  arrange(desc(n)) %>%
+  mutate(perc=round(n/sum(int.kingdoms %>% filter(sourceTaxonKingdomName=='Plantae' | targetTaxonKingdomName=='Plantae') %>% pull(n))*100,1)) %>%
+  group_by(interactionTypeName) %>%
+  dplyr::summarise(n=sum(n), perc=sum(perc)) %>%
+  arrange(desc(n))
+```
+Find the plant - kill/preysOn interactions
+```{r}
+interactions %>%
+  filter(sourceTaxonKingdomName=='Plantae' | targetTaxonKingdomName=='Plantae') %>%
+  filter(interactionTypeName=='kills' | interactionTypeName=='preysOn')
+```
+
+Number of datasets with `hostOf` interactions:
+```{r}
+
+```
+
+### Animals
+
+## Most common plant families
+```{r}
+interactions %>%
+  filter(sourceTaxonKingdomName %in% animals | targetTaxonKingdomName %in% animals) %>%
+  dplyr::rename(id=sourceTaxonId,speciesName=sourceTaxonSpeciesName,kingdomId=sourceTaxonKingdomId,kingdomName=sourceTaxonKingdomName, order=sourceTaxonOrderName) %>%
+  select(id,speciesName,kingdomId,kingdomName, order) %>%
+  bind_rows(
+    interactions %>%
+      filter(sourceTaxonKingdomName %in% animals | targetTaxonKingdomName %in% animals) %>%
+      dplyr::rename(id=targetTaxonId, speciesName=targetTaxonSpeciesName, kingdomId=targetTaxonKingdomId, kingdomName=targetTaxonKingdomName,order=targetTaxonOrderName) %>%
+      select(id,speciesName,kingdomId,kingdomName, order)
+  ) %>%
+  filter(kingdomName %in% animals) %>%
+  group_by(order) %>%
+  dplyr::summarise(n=n(), perc=round(n/(nrow(.)*2)*100,1)) %>%
+  arrange(desc(n))
+  
+```
+
+```{r}
+int.kingdoms %>%
+  filter(sourceTaxonKingdomName=='Animalia' | targetTaxonKingdomName=='Animalia') %>%
+  group_by(sourceTaxonKingdomName, targetTaxonKingdomName, interactionTypeName) %>%
+  arrange(desc(n)) %>%
+  mutate(perc=round(n/sum(int.kingdoms %>% filter(sourceTaxonKingdomName=='Animalia' | targetTaxonKingdomName=='Animalia') %>% pull(n))*100,1)) %>%
+  group_by(interactionTypeName) %>%
+  dplyr::summarise(n=sum(n), perc=sum(perc)) %>%
+  arrange(desc(n))
+```
+
+
+
+

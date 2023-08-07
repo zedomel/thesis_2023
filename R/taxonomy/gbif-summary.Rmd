@@ -1,0 +1,79 @@
+---
+title: "GBIF Data analysis"
+author: "Jose A Salim"
+date: "2023-06-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(dplyr)
+```
+
+## Summary statistics
+
+
+```{r}
+dwc_terms <- read.csv('data/dwc_terms.tsv', header = F, sep = '\t')
+names(dwc_terms) <- c('n','term')
+dwc_terms <- dwc_terms %>%
+  group_by(term) %>%
+  dplyr::summarise(n=sum(n))
+dwc_terms
+```
+
+
+Plot the percentages
+```{r}
+dwc_terms_perc <- dwc_terms %>%
+  mutate(perc = n/sum(dwc_terms$n)) %>%
+  mutate(csum = rev(cumsum(rev(perc))), 
+         ypos = perc/2 + lead(csum,1)) %>%
+  mutate(ypos = if_else(is.na(ypos), perc/2,ypos))
+dwc_terms_perc
+```
+
+```{r}
+plt <- dwc_terms_perc %>%
+  ggplot(aes(x="", y=perc, fill=(term))) +
+  geom_col(width = 1,color=1) +
+  coord_polar("y", start = 0) +
+  scale_fill_brewer(palette = "Pastel1") +
+  geom_label_repel(aes(y = ypos,
+                       label = glue::glue("{scales::percent(perc,accuracy=0.01)}"), 
+                       fill = term),
+                   size = 4,
+                   nudge_x = 0.7,
+                   show.legend =F) +
+  labs(title = expression("Frequency of DwC terms used\nto document biotic interactions")) +
+  guides(fill = guide_legend(title = "DwC Term", nrow=5, title.position = 'top', title.hjust = 0.5)) +
+  theme_ipsum(
+    base_family = 'Arial'
+  ) +
+  theme(
+    plot.title = element_text(size=18, face='bold', hjust = 0.5),
+    axis.text.x=element_blank(), #remove x axis labels
+    axis.ticks.x=element_blank(), #remove x axis ticks
+    axis.text.y=element_blank(),  #remove y axis labels
+    axis.ticks.y=element_blank(),  #remove y axis ticks
+    axis.title = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.grid = element_blank(),
+    legend.position = "bottom"
+  )
+plt
+```
+
+
+```{r}
+ggsave('images/dwc-terms.png', plot = plt, dpi = 300)
+```

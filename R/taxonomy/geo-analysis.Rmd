@@ -1,0 +1,407 @@
+---
+title: "Geographic Analysis of biotic interactions data"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load packages
+```{r}
+library(dplyr)
+#library(tidyverse)
+library(maps)
+library(ggplot2)
+library(rnaturalearth)
+library(sf)
+library(viridis)
+library(scales)
+library(RColorBrewer)
+library(wdpar)
+```
+
+Define some colors for mapping
+```{r}
+# Colors
+BLUE <- "#076fa2"
+RED <- "#E3120B"
+BLACK <- "#202020"
+GREY <- "grey50"
+GREEN <- "#90ff01"
+GREEN2 <- "#69b3a2"
+
+
+# Interaction types colors
+INT_TYPES_COLORS = c(
+  "interactsWith" = "#069668", 
+  "hasHost" = "#c02a85", 
+  "preysOn" = "#6fed8f",
+  "eats" = "#fa79f5",
+  "coOccursWith" = "#3aa609",
+  "epiphyteOf" = "#9739d9",
+  "visitsFlowersOf" =  "#76f014", 
+  "muatualistOf" =  "#fe16f4",
+  "createdHabitatFor" = "#c5df72",
+  "parasiteOf" = "#473c85",
+  "kills" = "#f6cf89",
+  "ectoparasiteOf" =  "#8f0f1b",
+  "symbiontOf" = "#93e0f0"
+)
+```
+
+
+# Load and prepate data 
+
+Load interactions with location and time data
+```{r}
+interactions.data <- read.csv("data/interactions-taxon-loc-time.tsv.gz", header=T, sep = '\t', quote="")
+names(interactions.data)
+head(interactions.data)
+dim(interactions.data)
+```
+
+### DEBUG
+```{r}
+#saveRDS(interactions.data, file = 'data/interactions.data.tmp.rds')
+interactions.data <- interactions.data %>%
+  sample_n(10000)
+head(interactions.data)
+```
+
+Remove records with missing taxonomic data:
+```{r}
+int.copy <- interactions.data
+interactions.data <- int.copy %>%
+  filter(sourceTaxonId != 'no:match' & targetTaxonId != 'no:match') %>%
+  filter(sourceTaxonSpeciesName != "" & targetTaxonSpeciesName != '')
+dim(int.copy)
+dim(interactions.data)
+```
+
+Remove records missing lat/lon
+```{r}
+interactions.latlon <- interactions.data %>%
+  filter(!is.na(decimalLatitude) & !is.na(decimalLongitude) & decimalLatitude!="" & decimalLongitude!="") %>%
+  dplyr::count(decimalLatitude,decimalLongitude, interactionTypeName) %>%
+  ungroup() %>% 
+  arrange(desc(n))
+dim(interactions.latlon)
+```
+
+```{r}
+sum(interactions.latlon$n)
+```
+
+Get countries polygons
+```{r}
+countries <- ne_countries(scale='large', returnclass = 'sf')
+```
+
+Clean data: remove records with invalid or zero coordinates, remove records outside countries boundaries
+```{r}
+interactions.cleaned <- interactions.latlon %>%
+  CoordinateCleaner::cc_val(lat="decimalLatitude", lon="decimalLongitude", verbose = F) %>%
+  CoordinateCleaner::cc_zero(lat="decimalLatitude", lon="decimalLongitude", verbose=F)
+dim(interactions.cleaned)
+
+#interactions.cleaned.sea <- interactions.cleaned %>%
+#  CoordinateCleaner::cc_sea(lat="decimalLatitude", lon="decimalLongitude", verbose = F, speedup = T,ref = sf::as_Spatial(countries)) 
+```
+
+```{r}
+sum(interactions.cleaned$n)
+```
+
+
+Get WDPA (protected areas spatial data)
+```{r}
+#wdpa <- readRDS('data/wdpa-cleaned.rds')
+#wdpa <- wdpa_fetch('global', wait = TRUE, download_dir = 'data/wdpa')
+wdpa <- st_read('data/wdpa/wdpa-qgis.shp', stringsAsFactors=F)
+```
+
+Clean data WPDA data
+```{r}
+wdpa <- wdpa_clean(wdpa, erase_overlaps = FALSE, geometry_precision=100)
+```
+
+Remove POINTS
+```{r}
+wdpa <- wdpa %>%
+  filter(GEOMETRY_TYPE=='POLYGON')
+```
+
+Dissolve small polygons
+```{r}
+wdpa <- wdpa_dissolve(wdpa, geometry_precision = 100) 
+```
+
+Reproject to WGD84
+```{r}
+wdpa <- st_transform(wdpa, 4326)
+wdpa
+```
+
+Save RDS
+```{r}
+#saveRDS(wdpa, file='data/wdpa-clean.rds')
+wdpa
+```
+
+# DEBUG
+```{r}
+wdpa <- wdpa %>% sample_n(10000)
+```
+
+World boundaries layer
+```{r}
+world <- map_data('world')
+```
+
+# Plots
+
+Plot interaction records 
+```{r}
+interactions.cleaned  %>%
+  ggplot(mapping = aes(x=decimalLongitude, y=decimalLatitude)) +
+  geom_point(aes(colour=as.factor(interactionTypeName), size=n))
+```
+
+
+World distribution of interaction observations and WDPA polygons (protected areas)
+```{r}
+p <- interactions.cleaned  %>%
+  ggplot() +
+  geom_polygon(data = world, aes(x=long, y = lat, group = group), fill="grey90", alpha=0.8) +
+  #geom_hex(bins=200) +
+  geom_point(aes(x=decimalLongitude, y=decimalLatitude, colour=interactionTypeName), size=0.5, alpha=1) +
+  #geom_sf(data=wdpa, linewidth=0.5, fill="#FEFF00", alpha=0.5, show.legend = F) +
+  #scale_size_continuous(
+  #  name = "Num. Interactions",
+    #trans = 'log10',
+  #  range = c(2, 7),
+  #  guide = guide_legend(keyheight = unit(2.5, units = "mm"), keywidth=unit(10, units = "mm"), label.position = "bottom", title.position = 'top', nrow=2) 
+  #) +
+  scale_color_manual(
+    values = INT_TYPES_COLORS,
+    name="Interaction type", 
+    guide = guide_legend(override.aes = list(size = 5), keyheight = unit(2.5, units = "mm"), keywidth=unit(10, units = "mm"), label.position = "bottom", title.position = 'top', nrow=2) 
+  )  +
+  scale_x_continuous(limits = c(-180,180)) +
+  scale_y_continuous(limits = c(-90,90)) +
+  theme_void() + theme(
+    legend.position = "bottom",
+    legend.key.size = unit(3,"cm"),
+  )
+p
+```
+
+Save plot
+```{r}
+ggsave(filename = 'images/interactions-wdpa-worldmap.pdf', plot=p, dpi=300)
+```
+
+
+```{r}
+top <- wdpa %>%
+  arrange(desc(REP_AREA))
+top
+```
+
+
+Map without interaction of type: interactionWith and coOccursWith
+```{r}
+p <- interactions.cleaned  %>%
+  filter(interactionTypeName!="interactsWith" & interactionTypeName!="coOccursWith") %>%
+  ggplot() +
+  geom_sf(data=wdpa, linewidth=NA, fill="#c5df72", color=NA, alpha=0.25, show.legend = F) +
+  geom_polygon(data = world, aes(x=long, y = lat, group = group), fill="grey90", colour=NA, linewidth=NA, alpha=0.3) +
+  #geom_hex(bins=200) +
+  geom_point(aes(x=decimalLongitude, y=decimalLatitude, colour=interactionTypeName), size=0.5, alpha=1) +
+  #scale_size_continuous(
+  #  name = "Num. Interactions",
+    #trans = 'log10',
+    #range = c(2, 7),
+  #  guide = guide_legend(keyheight = unit(2.5, units = "mm"), keywidth=unit(10, units = "mm"), label.position = "bottom", title.position = 'top', nrow=2) 
+  #) +
+  scale_color_manual(
+    values = INT_TYPES_COLORS,
+    name="Interaction type", 
+    guide = guide_legend(override.aes = list(size = 5), keyheight = unit(2.5, units = "mm"), keywidth=unit(10, units = "mm"), label.position = "bottom", title.position = 'top', nrow=2) 
+  )  +
+  scale_x_continuous(limits = c(-180,180)) +
+  scale_y_continuous(limits = c(-90,90)) +
+  theme_void() + theme(
+    legend.position = "bottom",
+    legend.key.size = unit(3,"cm"),
+  )
+p
+```
+
+Save plot
+```{r}
+ggsave(filename = 'images/interactions-worldmap-wo-generic-inttypes.png', plot=p, dpi=300)
+```
+
+## Join Protected Areas and Interactions records
+
+Create a interaction points layer in WGS84
+```{r}
+int.points <- st_as_sf(interactions.cleaned, coords = c('decimalLongitude','decimalLatitude'), crs = 4326) #"+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+```
+
+Find intersection between WDPA polygons and interaction points
+```{r}
+int.wdpa <- st_intersects(int.points, wdpa)
+int.points.intersect <- lengths(int.wdpa) > 0
+wdpa.intersect <- lengths(t(int.wdpa)) > 0
+```
+
+Total area of WDPA
+```{r}
+sum(wdpa$REP_ARE)
+```
+
+Display some summary results
+```{r}
+print(paste0("% of points inside protected areas: ", round(nrow(int.points[int.points.intersect,])/nrow(int.points)*100,2), '%'))
+wdpa.total_area <- sum(wdpa$REP_ARE)
+wdpa.total_area
+int.total_area <- sum(wdpa[wdpa.intersect,]$REP_ARE)
+int.total_area
+print(paste("% Total area of protected areas with interaction records:", int.total_area/wdpa.total_area*100))
+print(paste("Total area (milions of km2) of protected areas with interaction records:", round(int.total_area,2)))
+```
+
+
+```{r}
+st_write(wdpa %>% select(-WDPAID), 'data/wdpa-clean.shp', append=F)
+```
+
+World distribution of interaction observations and WDPA polygons (protected areas)
+```{r}
+p <- interactions.cleaned[int.points.intersect,]  %>%
+  ggplot() +
+  geom_polygon(data = world, aes(x=long, y = lat, group = group), fill="grey90", alpha=0.8) +
+  #geom_hex(bins=200) +
+  geom_sf(data=wdpa, linewidth=NA, fill="#c5df72", alpha=0.5, show.legend = F) +
+  geom_point(aes(x=decimalLongitude, y=decimalLatitude, colour=interactionTypeName), size=0.2, alpha=1) +
+  #scale_size_continuous(
+  #  name = "Num. Interactions",
+    #trans = 'log10',
+  #  range = c(2, 7),
+  #  guide = guide_legend(keyheight = unit(2.5, units = "mm"), keywidth=unit(10, units = "mm"), label.position = "bottom", title.position = 'top', nrow=2) 
+  #) +
+  scale_color_manual(
+    values = INT_TYPES_COLORS,
+    name="Interaction type", 
+    guide = guide_legend(override.aes = list(size = 5), keyheight = unit(2.5, units = "mm"), keywidth=unit(10, units = "mm"), label.position = "bottom", title.position = 'top', nrow=2) 
+  )  +
+  scale_x_continuous(limits = c(-180,180)) +
+  scale_y_continuous(limits = c(-90,90)) +
+  theme_void() + theme(
+    legend.position = "bottom",
+    legend.key.size = unit(3,"cm"),
+  )
+p
+```
+
+Save plot
+```{r}
+ggsave(filename = 'images/interactions-wdpa-intersection-worldmap.png', plot=p, dpi=300)
+```
+
+## Intersection Bioregions and interaction observations
+
+```{r}
+library(geodat)
+data(zoorealms)
+zoorealms <- st_wrap_dateline(zoorealms, options = c("WRAPDATELINE=YES","DATELINEOFFSET=180"))
+```
+
+Re-project realm data
+```{r}
+zoorealms <- sf::st_transform(zoorealms, 4326)
+```
+
+Plot map of realm data
+```{r}
+p <- ggplot() + geom_sf(data=zoorealms, aes(fill=Realm)) + 
+  scale_fill_manual(values=ggsci::pal_d3("category20")(11)) + 
+  scale_x_continuous(limits = c(-180,180)) +
+  scale_y_continuous(limits = c(-90,90)) +
+  coord_sf() + 
+  theme_bw() + theme(panel.border = element_blank(),
+                     legend.title = element_text(size=12, face="bold"))
+p
+```
+
+Intersection interactions and zoorealms
+```{r}
+zoorealms <- zoorealms %>% st_make_valid()
+zoorealms
+int.zooreamls <- st_intersects(int.points, zoorealms, sparse = F)
+int.zooreamls
+```
+
+Intersection by zoorealms
+```{r}
+int.by.realm <- apply(int.zooreamls, 2, sum)
+names(int.by.realm) <- zoorealms$Realm
+total = sum(int.by.realm)
+```
+
+```{r}
+print("% of records by biogegraphy realm: ")
+print(names(int.by.realm))
+print(paste(int.by.realm, paste0(round(int.by.realm/total*100, 2), "%"), sep ="/"))
+int.by.realm
+round(int.by.realm/total*100, 2)
+```
+
+Plot interactions over biorealms:
+```{r}
+```
+
+# Temporal Analysis
+
+
+Convert `eventDate` to year
+```{r}
+int.dates <- interactions.data %>%
+  filter(eventDate != "")
+
+int.by.year <- int.dates %>%
+  mutate(year=as.integer(format(as.Date(eventDate), "%Y")))
+max(int.by.year$year, na.rm=T)
+```
+
+Filter invalid dates
+```{r}
+int.by.year <- int.by.year %>%
+  filter(year>=1800 & year<=2023)
+dim(int.by.year)
+```
+
+Plot interactions by year
+```{r}
+dplyr::count(year, interactionTypeName) %>%
+  ungroup() %>%
+  arrange(year)
+dim(int.by.year)  
+int.by.year
+
+plt <- int.by.year %>%
+  mutate(year=as.integer(year)) %>%
+  ggplot(aes(x=year, y=n, color=interactionTypeName)) +
+  geom_point() +
+  theme_ipsum(
+    base_family = 'Arial',
+  ) + 
+  theme(
+    legend.position = 'bottom'
+  )
+plt
+
+```
